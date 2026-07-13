@@ -1,0 +1,29 @@
+2026-07-13 19:10:06 | INFO    | ACTION server startup: listening on 0.0.0.0:8080
+2026-07-13 19:10:29 | INFO    | ACTION GET / from 127.0.0.1
+2026-07-13 19:10:51 | INFO    | ACTION POST /upload from 127.0.0.1: filename=enron_spam_data_raw.csv
+2026-07-13 19:10:51 | INFO    | POST /upload from 127.0.0.1: read 51690056 bytes for enron_spam_data_raw.csv
+2026-07-13 19:10:51 | INFO    | ACTION run_pipeline: starting full pipeline
+2026-07-13 19:10:51 | INFO    | run_pipeline: output directory for this run -> /home/antony/masai/capstone/spam_detection/run/part1_20260713_191051_638091
+2026-07-13 19:10:51 | INFO    | ACTION load_and_clean: parsing uploaded CSV
+2026-07-13 19:10:52 | INFO    | load_and_clean: parsed CSV with shape=(33716, 5) columns=['Message ID', 'Subject', 'Message', 'Spam/Ham', 'Date']
+2026-07-13 19:10:52 | INFO    | load_and_clean: dropped 3222 content-duplicate rows (33716 -> 30494)
+2026-07-13 19:10:52 | INFO    | load_and_clean: cleaning complete, final shape=(30494, 5)
+2026-07-13 19:10:52 | INFO    | ACTION engineer_features: computing text-derived numeric features for 30494 rows
+2026-07-13 19:11:00 | INFO    | engineer_features: filled 1 nulls in avg_word_len with median
+2026-07-13 19:11:00 | INFO    | engineer_features: done, columns added=['word_count', 'char_count', 'avg_word_len', 'capital_ratio', 'digit_count', 'punct_count', 'exclaim_count']
+2026-07-13 19:11:02 | INFO    | run_pipeline: saved cleaned dataset -> /home/antony/masai/capstone/spam_detection/run/part1_20260713_191051_638091/cleaned_data.csv (30494 rows)
+2026-07-13 19:11:02 | INFO    | ACTION make_charts: generating bar/hist/scatter/heatmap charts
+2026-07-13 19:11:02 | INFO    | Saved chart to /home/antony/masai/capstone/spam_detection/run/part1_20260713_191051_638091/01_bar_chart.png
+2026-07-13 19:11:03 | INFO    | Saved chart to /home/antony/masai/capstone/spam_detection/run/part1_20260713_191051_638091/02_histogram.png
+2026-07-13 19:11:03 | INFO    | Saved chart to /home/antony/masai/capstone/spam_detection/run/part1_20260713_191051_638091/03_scatter_plot.png
+2026-07-13 19:11:04 | INFO    | Saved chart to /home/antony/masai/capstone/spam_detection/run/part1_20260713_191051_638091/04_correlation_heatmap.png
+2026-07-13 19:11:04 | INFO    | make_charts: generated 4 charts, saved to /home/antony/masai/capstone/spam_detection/run/part1_20260713_191051_638091
+2026-07-13 19:11:04 | INFO    | ACTION train_and_evaluate: training TF-IDF + MultinomialNB on 30494 rows (test_size=0.25)
+2026-07-13 19:11:04 | INFO    | train_and_evaluate: split into train=22870 test=7624 rows
+2026-07-13 19:11:11 | INFO    | train_and_evaluate: TF-IDF vocabulary size=8000
+2026-07-13 19:11:11 | INFO    | train_and_evaluate: accuracy=0.9831 precision=0.9767 recall=0.9882 f1=0.9824
+2026-07-13 19:11:11 | INFO    | ACTION confusion_matrix_chart: rendering confusion matrix image
+2026-07-13 19:11:12 | INFO    | Saved chart to /home/antony/masai/capstone/spam_detection/run/part1_20260713_191051_638091/05_confusion_matrix.png
+2026-07-13 19:11:12 | INFO    | run_pipeline: complete, rows=30494 spam=14584 ham=15910, outputs saved to /home/antony/masai/capstone/spam_detection/run/part1_20260713_191051_638091
+2026-07-13 19:11:12 | INFO    | POST /upload from 127.0.0.1: success for enron_spam_data_raw.csv (rows=30494, accuracy=98.3%)
+2026-07-13 19:12:01 | INFO    | ACTION server shutdown

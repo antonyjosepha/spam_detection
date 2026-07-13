@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html xmlns:py="http://genshi.edgewall.org/">
+<head>
+    <meta charset="utf-8"/>
+    <title>Spam Detection - Results</title>
+    <link rel="stylesheet" type="text/css" href="/static/style.css"/>
+</head>
+<body>
+    <div class="container">
+        <header class="app-header">
+            <h1>Spam Detection Results</h1>
+            <p class="subtitle">
+                File: <strong>${filename}</strong> &#8212;
+                ${summary['n_rows']} rows analyzed
+                (${summary['n_spam']} spam / ${summary['n_ham']} ham)
+            </p>
+            <a class="back-link" href="/">&#8592; Analyze another file</a>
+        </header>
+
+        <div class="tabs">
+            <button class="tab-btn active" data-tab="overview">Overview</button>
+            <button class="tab-btn" data-tab="stats">Statistics</button>
+            <button class="tab-btn" data-tab="charts">Charts</button>
+            <button class="tab-btn" data-tab="predictions">Predictions</button>
+        </div>
+
+        <div id="overview" class="tab-panel active">
+            <div class="metric-grid">
+                <div class="metric-card">
+                    <span class="metric-label">Accuracy</span>
+                    <span class="metric-value">${metrics['accuracy']}</span>
+                </div>
+                <div class="metric-card">
+                    <span class="metric-label">Precision (spam)</span>
+                    <span class="metric-value">${metrics['precision']}</span>
+                </div>
+                <div class="metric-card">
+                    <span class="metric-label">Recall (spam)</span>
+                    <span class="metric-value">${metrics['recall']}</span>
+                </div>
+                <div class="metric-card">
+                    <span class="metric-label">F1 Score</span>
+                    <span class="metric-value">${metrics['f1']}</span>
+                </div>
+            </div>
+            <p class="hint">Model: TF-IDF + Multinomial Naive Bayes, trained and evaluated on a 75/25 split of the uploaded file.</p>
+            <div class="chart-box single">
+                <img src="data:image/png;base64,${cm_chart}" alt="Confusion matrix"/>
+            </div>
+        </div>
+
+        <div id="stats" class="tab-panel">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>Stat</th>
+                        <th py:for="col in numeric_cols">${col}</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr py:for="row in stats_rows">
+                        <td>${row['stat']}</td>
+                        <td py:for="col in numeric_cols">${row[col]}</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div id="charts" class="tab-panel">
+            <div class="chart-grid">
+                <div class="chart-box"><img src="data:image/png;base64,${charts['bar']}" alt="Mean word count by class"/></div>
+                <div class="chart-box"><img src="data:image/png;base64,${charts['hist']}" alt="Character count distribution"/></div>
+                <div class="chart-box"><img src="data:image/png;base64,${charts['scatter']}" alt="Word count vs character count"/></div>
+                <div class="chart-box"><img src="data:image/png;base64,${charts['heatmap']}" alt="Correlation heat map"/></div>
+            </div>
+        </div>
+
+        <div id="predictions" class="tab-panel">
+            <input type="text" id="predSearch" placeholder="Filter by subject..."/>
+            <table class="data-table" id="predTable">
+                <thead>
+                    <tr>
+                        <th>Subject</th>
+                        <th>Actual</th>
+                        <th>Predicted</th>
+                        <th>Spam probability</th>
+                        <th>Correct</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr py:for="r in results" class="${r['row_class']}">
+                        <td>${r['subject_short']}</td>
+                        <td>${r['actual']}</td>
+                        <td>${r['predicted']}</td>
+                        <td>${r['spam_prob_display']}</td>
+                        <td class="correct-cell" py:content="'✔' if r['correct'] else '✘'"></td>
+                    </tr>
+                </tbody>
+            </table>
+            <p class="hint">Showing up to 300 test-set rows, sorted by predicted spam probability.</p>
+        </div>
+    </div>
+
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="/static/script.js"></script>
+</body>
+</html>

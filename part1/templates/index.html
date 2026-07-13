@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html xmlns:py="http://genshi.edgewall.org/">
+<head>
+    <meta charset="utf-8"/>
+    <title>Spam Detection - Part1</title>
+    <link rel="stylesheet" type="text/css" href="/static/style.css"/>
+</head>
+<body>
+    <div class="container">
+        <header class="app-header">
+            <h1>Spam Detection</h1>
+            <p class="subtitle">Upload a raw email CSV to clean it, engineer features, and classify spam vs. ham.</p>
+        </header>
+
+        <div class="card">
+            <div py:if="error" class="error-box">${error}</div>
+
+            <form id="uploadForm" action="/upload" method="post" enctype="multipart/form-data">
+                <label for="csvfile">CSV file</label>
+                <input type="file" id="csvfile" name="csvfile" accept=".csv" required="required"/>
+                <p class="hint">
+                    Required columns: <code>Subject</code>, <code>Message</code>, <code>Spam/Ham</code>
+                    (values <code>spam</code> / <code>ham</code>). An optional <code>Date</code> column is used if present.
+                </p>
+                <button type="submit" id="submitBtn">Upload &amp; Analyze</button>
+            </form>
+
+            <div id="loading" class="hidden">
+                <div class="spinner"></div>
+                <p>Processing file&#8230; this can take a moment for large CSVs.</p>
+            </div>
+        </div>
+
+        <footer class="app-footer">
+            <p>Pipeline: dedupe &amp; clean &#8594; feature engineering &#8594; TF-IDF + Naive Bayes classifier, trained/evaluated on a 75/25 split of your file.</p>
+        </footer>
+    </div>
+
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="/static/script.js"></script>
+</body>
+</html>

@@ -1,0 +1,36 @@
+2026-07-13 19:12:19 | INFO    | ACTION server startup: listening on 0.0.0.0:8080
+2026-07-13 19:12:26 | INFO    | ACTION GET / from 127.0.0.1
+2026-07-13 19:12:40 | INFO    | ACTION POST /upload from 127.0.0.1: filename=enron_spam_data_raw.csv
+2026-07-13 19:12:40 | INFO    | POST /upload from 127.0.0.1: read 51690056 bytes for enron_spam_data_raw.csv
+2026-07-13 19:12:40 | INFO    | ACTION run_pipeline: starting full pipeline
+2026-07-13 19:12:40 | INFO    | run_pipeline: output directory for this run -> /home/antony/masai/capstone/spam_detection/run/part2_20260713_191240_387997
+2026-07-13 19:12:40 | INFO    | ACTION load_and_clean: parsing uploaded CSV
+2026-07-13 19:12:40 | INFO    | load_and_clean: parsed CSV with shape=(33716, 5) columns=['Message ID', 'Subject', 'Message', 'Spam/Ham', 'Date']
+2026-07-13 19:12:40 | INFO    | load_and_clean: dropped 3222 content-duplicate rows (33716 -> 30494)
+2026-07-13 19:12:40 | INFO    | load_and_clean: cleaning complete, final shape=(30494, 5)
+2026-07-13 19:12:40 | INFO    | ACTION engineer_features: computing text-derived numeric features for 30494 rows
+2026-07-13 19:12:49 | INFO    | engineer_features: filled 1 nulls in avg_word_len with median
+2026-07-13 19:12:49 | INFO    | engineer_features: done, columns added=['word_count', 'char_count', 'avg_word_len', 'capital_ratio', 'digit_count', 'punct_count', 'exclaim_count']
+2026-07-13 19:12:51 | INFO    | run_pipeline: saved cleaned dataset -> /home/antony/masai/capstone/spam_detection/run/part2_20260713_191249_381338/cleaned_data.csv (30494 rows)
+2026-07-13 19:12:51 | INFO    | ACTION load_cleaned: reading /home/antony/masai/capstone/spam_detection/run/part2_20260713_191249_381338/cleaned_data.csv
+2026-07-13 19:12:52 | INFO    | load_cleaned: shape=(30494, 13)
+2026-07-13 19:12:52 | INFO    | ACTION build_features_and_labels: engineering categorical features
+2026-07-13 19:12:52 | INFO    | build_features_and_labels: X shape=(30494, 12), columns=['avg_word_len', 'capital_ratio', 'digit_count', 'punct_count', 'exclaim_count', 'digit_level_enc', 'weekday_Monday', 'weekday_Saturday', 'weekday_Sunday', 'weekday_Thursday', 'weekday_Tuesday', 'weekday_Wednesday']
+2026-07-13 19:12:52 | INFO    | ACTION split_and_scale: test_size=0.20 random_state=42
+2026-07-13 19:12:52 | INFO    | split_and_scale: train=24395 test=6099 rows
+2026-07-13 19:12:52 | INFO    | ACTION run_regression: fitting Linear + Ridge regression
+2026-07-13 19:12:52 | INFO    | run_regression: OLS MSE=102513.356 R2=0.8584 | Ridge MSE=102524.332 R2=0.8584
+2026-07-13 19:12:52 | INFO    | Saved chart to /home/antony/masai/capstone/spam_detection/run/part2_20260713_191249_381338/05_regression_scatter.png
+2026-07-13 19:12:52 | INFO    | ACTION run_classification: fitting Logistic Regression (C=1.0)
+2026-07-13 19:12:52 | INFO    | ACTION check_class_balance
+2026-07-13 19:12:52 | INFO    | check_class_balance: counts={0: 12735, 1: 11660} pct={0: 52.2, 1: 47.8} minority=47.80% needs_action=False
+2026-07-13 19:12:52 | INFO    | run_classification: AUC=0.7857 accuracy=0.7050
+2026-07-13 19:12:53 | INFO    | Saved chart to /home/antony/masai/capstone/spam_detection/run/part2_20260713_191249_381338/06_confusion_matrix_clf.png
+2026-07-13 19:12:53 | INFO    | Saved chart to /home/antony/masai/capstone/spam_detection/run/part2_20260713_191249_381338/07_roc_curve.png
+2026-07-13 19:12:53 | INFO    | run_classification: F1-maximizing threshold=0.30
+2026-07-13 19:12:53 | INFO    | ACTION run_regularization_experiment: fitting Logistic Regression (C=0.01)
+2026-07-13 19:12:53 | INFO    | run_regularization_experiment: comparison=[{'model': 'C=1.0', 'precision': 0.7021200143729788, 'recall': 0.6682626538987688, 'auc': 0.7857202947100832}, {'model': 'C=0.01', 'precision': 0.7020510975170925, 'recall': 0.6672366621067032, 'auc': 0.7836729428999214}]
+2026-07-13 19:12:53 | INFO    | ACTION bootstrap_auc_diff: n_boot=500
+2026-07-13 19:12:58 | INFO    | bootstrap_auc_diff: n_valid=500 mean=0.0020 CI=[0.0015, 0.0026] excludes_zero=True
+2026-07-13 19:12:58 | INFO    | run_pipeline: complete, outputs saved to /home/antony/masai/capstone/spam_detection/run/part2_20260713_191249_381338
+2026-07-13 19:12:58 | INFO    | POST /part2 from 127.0.0.1: success, AUC=0.7857 R2(reg)=0.8584
