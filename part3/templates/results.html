@@ -3,110 +3,137 @@
       py:strip="">
 <head>
     <meta charset="utf-8"/>
-    <title>Part 2 Results — Regression &amp; Classification</title>
+    <title>Part 3 Results — Ensembles, Tuning, Pipeline</title>
     <link rel="stylesheet" type="text/css" href="/static/style.css"/>
 </head>
 <body>
 <div class="container">
-    <h1>Part 2 — Supervised ML Results</h1>
-    <p class="subtitle">Source: <code>${cleaned_csv_path}</code> &nbsp;|&nbsp; Run dir: <code>${run_dir}</code></p>
+    <h1>Part 3 — Ensembles, Tuning, and Full ML Pipeline</h1>
+    <p class="subtitle">Run dir: <code>${run_dir}</code></p>
 
-    <h2>Feature Matrix</h2>
-    <p>
-        ${len(feature_names)} features used for both models (shared, leak-free):
-        <code>${', '.join(feature_names)}</code>
-    </p>
-    <p class="note">
-        <code>char_count</code> was deliberately excluded (r=0.996 with the regression
-        target <code>word_count</code> — near-definitional leakage). Categorical features
-        <code>weekday</code> (one-hot, drop-first) and <code>digit_level</code> (ordinal
-        label-encoded Low&lt;Medium&lt;High) were derived specifically to demonstrate both
-        encoding strategies without leaking either target.
-    </p>
-
-    <h2>Regression — Predicting word_count</h2>
+    <h2>Task 1-2 — Decision Tree: Unconstrained vs. Controlled</h2>
     <table class="metrics-table">
-        <tr><th>Model</th><th>MSE</th><th>R²</th></tr>
-        <tr><td>Linear Regression</td><td>${"%.2f" % regression['mse_lr']}</td><td>${"%.4f" % regression['r2_lr']}</td></tr>
-        <tr><td>Ridge (alpha=1.0)</td><td>${"%.2f" % regression['mse_ridge']}</td><td>${"%.4f" % regression['r2_ridge']}</td></tr>
-    </table>
-
-    <h3>Top 3 coefficients by |magnitude| (Linear Regression, scaled features)</h3>
-    <table class="metrics-table">
-        <tr><th>Feature</th><th>OLS coef</th><th>Ridge coef</th></tr>
-        <tr py:for="row in regression['top3']">
-            <td>${row['feature']}</td>
-            <td>${"%.3f" % row['lr_coef']}</td>
-            <td>${"%.3f" % row['ridge_coef']}</td>
+        <tr><th>Tree</th><th>Train Acc</th><th>Test Acc</th><th>Gap</th><th>Extra</th></tr>
+        <tr>
+            <td>Unconstrained</td>
+            <td>${"%.4f" % task1['train_acc']}</td>
+            <td>${"%.4f" % task1['test_acc']}</td>
+            <td>${"%.4f" % task1['gap']}</td>
+            <td>depth=${task1['depth']}, leaves=${task1['n_leaves']}</td>
         </tr>
-    </table>
-
-    <img src="data:image/png;base64,${regression['scatter_chart']}" alt="Regression scatter"/>
-
-    <h2>Classification — Spam/Ham</h2>
-    <h3>Class balance check (training set)</h3>
-    <table class="metrics-table">
-        <tr><th>Class</th><th>Count</th><th>%</th></tr>
-        <tr py:for="cls, cnt in classification['balance_info']['counts_before'].items()">
-            <td>${'spam' if cls == 1 else 'ham'}</td>
-            <td>${cnt}</td>
-            <td>${classification['balance_info']['pct_before'][cls]}%</td>
+        <tr>
+            <td>Controlled (max_depth=5, min_samples_split=20)</td>
+            <td>${"%.4f" % task2['train_acc']}</td>
+            <td>${"%.4f" % task2['test_acc']}</td>
+            <td>${"%.4f" % task2['gap']}</td>
+            <td>test AUC=${"%.4f" % task2['test_auc']}</td>
         </tr>
     </table>
     <p class="note">
-        Minority class = ${classification['balance_info']['minority_pct']}% &nbsp;(threshold: 35%).
-        <span py:if="not classification['balance_info']['needs_action']">
-            Above threshold — no resampling required. <code>class_weight='balanced'</code>
-            applied anyway as a zero-cost weighting safeguard (no synthetic rows, so
-            before/after class counts are identical).
-        </span>
+        Gap dropped from ${"%.4f" % task1['gap']} (unconstrained) to ${"%.4f" % task2['gap']}
+        (controlled) — the unconstrained tree memorized training data (a classic high-variance
+        model: it grows greedily to depth ${task1['depth']} / ${task1['n_leaves']} leaves,
+        fitting noise along with signal, with no mechanism to revisit earlier splits).
     </p>
 
-    <h3>Confusion matrix &amp; classification report (C=1.0, threshold=0.5)</h3>
-    <img src="data:image/png;base64,${classification['cm_chart']}" alt="Confusion matrix"/>
+    <h2>Task 3 — Gini vs. Entropy (max_depth=5)</h2>
     <table class="metrics-table">
-        <tr><th>Class</th><th>Precision</th><th>Recall</th><th>F1</th><th>Support</th></tr>
-        <tr py:for="cls in ['ham', 'spam']">
-            <td>${cls}</td>
-            <td>${"%.3f" % classification['report'][cls]['precision']}</td>
-            <td>${"%.3f" % classification['report'][cls]['recall']}</td>
-            <td>${"%.3f" % classification['report'][cls]['f1-score']}</td>
-            <td>${classification['report'][cls]['support']}</td>
+        <tr><th>Criterion</th><th>Test Accuracy</th></tr>
+        <tr><td>Gini</td><td>${"%.4f" % task3['gini']}</td></tr>
+        <tr><td>Entropy</td><td>${"%.4f" % task3['entropy']}</td></tr>
+    </table>
+
+    <h2>Task 4 — Random Forest</h2>
+    <table class="metrics-table">
+        <tr><th>Train Acc</th><th>Test Acc</th><th>AUC</th></tr>
+        <tr>
+            <td>${"%.4f" % task4['train_acc']}</td>
+            <td>${"%.4f" % task4['test_acc']}</td>
+            <td>${"%.4f" % task4['auc']}</td>
         </tr>
     </table>
-    <p>Accuracy: ${"%.4f" % classification['report']['accuracy']} &nbsp;|&nbsp; AUC: ${"%.4f" % classification['auc']}</p>
-
-    <img src="data:image/png;base64,${classification['roc_chart']}" alt="ROC curve"/>
-
-    <h3>Threshold sensitivity</h3>
+    <h3>Top 5 features by importance</h3>
     <table class="metrics-table">
-        <tr><th>Threshold</th><th>Precision</th><th>Recall</th><th>F1</th></tr>
-        <tr py:for="row in classification['thresh_table']">
-            <td>${row['threshold']}</td>
-            <td>${"%.4f" % row['precision']}</td>
-            <td>${"%.4f" % row['recall']}</td>
-            <td>${"%.4f" % row['f1']}</td>
+        <tr><th>Feature</th><th>Importance</th></tr>
+        <tr py:for="feat, imp in task4['top5'].items()">
+            <td>${feat}</td>
+            <td>${"%.4f" % imp}</td>
         </tr>
     </table>
-    <p>F1-maximizing threshold: <strong>${classification['best_threshold']}</strong></p>
+    <img src="data:image/png;base64,${task4['importance_chart']}" alt="Feature importance"/>
 
-    <h2>Regularization experiment (C=1.0 vs C=0.01)</h2>
+    <h2>Task 4a — Gradient Boosting</h2>
     <table class="metrics-table">
-        <tr><th>Model</th><th>Precision</th><th>Recall</th><th>AUC</th></tr>
-        <tr py:for="row in regularization['comparison']">
+        <tr><th>Train Acc</th><th>Test Acc</th><th>AUC</th></tr>
+        <tr>
+            <td>${"%.4f" % task4a['train_acc']}</td>
+            <td>${"%.4f" % task4a['test_acc']}</td>
+            <td>${"%.4f" % task4a['auc']}</td>
+        </tr>
+    </table>
+
+    <h2>Task 4b — Feature Ablation</h2>
+    <p>Removed (5 lowest-importance): <code>${', '.join(task4b['removed_features'])}</code></p>
+    <table class="metrics-table">
+        <tr><th>Model</th><th>Test AUC</th></tr>
+        <tr><td>Full (all features)</td><td>${"%.4f" % task4b['auc_full']}</td></tr>
+        <tr><td>Reduced (5 removed)</td><td>${"%.4f" % task4b['auc_reduced']}</td></tr>
+    </table>
+    <p class="note">
+        AUC ${'improved slightly' if task4b['genuinely_uninformative'] else 'dropped'} after removal
+        (diff=${"%.4f" % task4b['diff']}) — these features were
+        <strong>${'genuinely uninformative' if task4b['genuinely_uninformative'] else 'contributing'}</strong>.
+    </p>
+
+    <h2>Task 5 — Cross-Validated Comparison (5-fold StratifiedKFold, ROC-AUC)</h2>
+    <table class="metrics-table">
+        <tr><th>Model</th><th>CV Mean AUC</th><th>CV Std AUC</th></tr>
+        <tr py:for="row in task5">
             <td>${row['model']}</td>
-            <td>${"%.4f" % row['precision']}</td>
-            <td>${"%.4f" % row['recall']}</td>
-            <td>${"%.4f" % row['auc']}</td>
+            <td>${"%.4f" % row['cv_mean_auc']}</td>
+            <td>${"%.4f" % row['cv_std_auc']}</td>
         </tr>
     </table>
 
-    <h2>Bootstrap AUC difference (C=1.0 minus C=0.01, n=${bootstrap['n_valid']})</h2>
+    <h2>Task 6 — GridSearchCV (Random Forest Pipeline)</h2>
+    <p>Configurations evaluated: ${task6['n_configs']} &nbsp;(x5 folds = ${task6['n_fits']} fits)</p>
+    <table class="metrics-table">
+        <tr><th>Parameter</th><th>Best Value</th></tr>
+        <tr py:for="k, v in task6['best_params'].items()">
+            <td>${k}</td><td>${v if v is not None else 'None'}</td>
+        </tr>
+    </table>
     <p>
-        Mean difference: <strong>${"%.4f" % bootstrap['mean_diff']}</strong> &nbsp;
-        95% CI: [${"%.4f" % bootstrap['ci_low']}, ${"%.4f" % bootstrap['ci_high']}] &nbsp;
-        Excludes zero: <strong>${bootstrap['excludes_zero']}</strong>
+        Best CV AUC: <strong>${"%.4f" % task6['best_cv_score']}</strong> &nbsp;|&nbsp;
+        Test AUC: <strong>${"%.4f" % task6['test_auc']}</strong>
     </p>
+
+    <h2>Task 6b — Learning Curve (Tuned Pipeline)</h2>
+    <table class="metrics-table">
+        <tr><th>Training Fraction</th><th>N Rows</th><th>Train AUC</th><th>Test AUC</th></tr>
+        <tr py:for="row in task6b['rows']">
+            <td>${row['fraction']}</td>
+            <td>${row['n_rows']}</td>
+            <td>${"%.4f" % row['train_auc']}</td>
+            <td>${"%.4f" % row['test_auc']}</td>
+        </tr>
+    </table>
+    <img src="data:image/png;base64,${task6b['chart']}" alt="Learning curve"/>
+
+    <h2>Task 7 — Serialized Model</h2>
+    <p>Saved to: <code>${task7['model_path']}</code></p>
+    <p>Reload + predict smoke test (2 sample rows): <code>${task7['sample_predictions']}</code></p>
+
+    <h2>Task 8 — Summary Comparison (Parts 2 + 3)</h2>
+    <table class="metrics-table">
+        <tr><th>Model</th><th>CV Mean AUC</th><th>CV Std AUC</th><th>Test AUC</th></tr>
+        <tr py:for="row in summary_table">
+            <td>${row['model']}</td>
+            <td>${"%.4f" % row['cv_mean_auc'] if row['cv_mean_auc'] is not None else '—'}</td>
+            <td>${"%.4f" % row['cv_std_auc'] if row['cv_std_auc'] is not None else '—'}</td>
+            <td>${"%.4f" % row['test_auc'] if row['test_auc'] is not None else '—'}</td>
+        </tr>
+    </table>
 
     <p><a href="/">&larr; Back to upload</a></p>
 </div>

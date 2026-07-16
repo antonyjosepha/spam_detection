@@ -441,7 +441,7 @@ def run_pipeline(file_like):
     # Save the cleaned and feature-engineered dataset.
     # This file serves as the input dataset for Part 2 (Regression & Classification).
     df.to_csv(cleaned_csv_path, index=False)
-    logger.info("run_pipeline: saved cleaned dataset -> %s (%d rows)", cleaned_csv_path, len(df))
+    logger.info("run_pipeline: saved cleaned dataset -> %s (%d rows)", cleaned_path, len(df))
 
     logger.info("ACTION run_pipeline: starting, source=%s", cleaned_csv_path)
     data = prepare_data(cleaned_csv_path)

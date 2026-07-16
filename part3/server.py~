@@ -67,7 +67,7 @@ class SpamDetectionApp:
 def main():
     cherrypy.config.update({
         "server.socket_host": "0.0.0.0",
-        "server.socket_port": int(os.environ.get("PORT", 8089)),
+        "server.socket_port": int(os.environ.get("PORT", 8080)),
         "server.max_request_body_size": 300 * 1024 * 1024,  # 300 MB, for large CSVs
         "server.thread_pool": 8,
         "log.screen": True,
