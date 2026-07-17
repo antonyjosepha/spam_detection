@@ -1,442 +1,357 @@
 """
-processing.py
+part4_processing.py
+Part 4 pipeline: LLM-powered feature, Track C -- Model Prediction Explanation.
 
-Part 2 pipeline: supervised ML on top of a Part 1 cleaned_data.csv.
+Loads the tuned pipeline from Part 3 (best_model.pkl), runs .predict() /
+.predict_proba() on hand-crafted feature-vector inputs, then asks an LLM to
+produce a structured, schema-validated JSON explanation of each prediction.
 
-Builds two models on a shared, leak-free feature matrix:
-  - Regression:     word_count (continuous)              via Linear + Ridge
-  - Classification: Spam/Ham binarized (spam=1/ham=0)     via Logistic Regression
+TRACK CHOSEN: (C) Model Prediction Explanation Pipeline -- chosen because it's
+the direct, natural extension of the model already built and serialized in
+Part 3, rather than introducing a disconnected new dataset shape (Track A) or
+re-scoring records against a rubric unrelated to the trained model (Track B).
 
-Reuses the run_dir / tmp-output pattern and logging conventions from processing.py
-so charts and artifacts for a Part 2 run land next to the Part 1 run they came from.
+HONESTY NOTE ON LLM CALLS: this module's LLM API domain is not reachable from
+the sandbox this was developed in, and no API key is configured there, so the
+actual call_llm() -> requests.post(...) path could not be exercised against a
+real provider during development. Everything downstream of the API response
+(JSON parsing, jsonschema validation, fallback handling, the PII guardrail,
+and -- most importantly -- the actual model .predict()/.predict_proba() calls
+against the real best_model.pkl) IS real and was tested end-to-end. When no
+LLM_API_KEY is set, call_llm() returns a clearly-labeled MOCK response (see
+_mock_llm_response()) so the full pipeline still runs top-to-bottom and every
+other requirement (schema validation, guardrail, tables) can be demonstrated
+honestly. Set LLM_API_KEY (and optionally LLM_API_URL / LLM_MODEL for a
+non-OpenRouter-compatible provider) and re-run to get real model output.
 """
 import io
 import os
+import re
+import json
 import base64
 from datetime import datetime
 
 import numpy as np
 import pandas as pd
-
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import LinearRegression, Ridge, LogisticRegression
-from sklearn.metrics import (
-    mean_squared_error, r2_score, confusion_matrix, classification_report,
-    roc_curve, roc_auc_score, precision_score, recall_score, f1_score,
-)
+import joblib
+import requests
+import jsonschema
 
 from logger_setup import get_logger
 
 logger = get_logger()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-TMP_DIR = os.path.normpath(os.path.join(BASE_DIR, "..", "tmp"))
 RUN_DIR_ROOT = os.path.normpath(os.path.join(BASE_DIR, "..", "run"))
-os.makedirs(TMP_DIR, exist_ok=True)
 os.makedirs(RUN_DIR_ROOT, exist_ok=True)
 
-BASE_NUMERIC_FEATURES = ["avg_word_len", "capital_ratio", "digit_count", "punct_count", "exclaim_count"]
-THRESHOLDS = [0.30, 0.40, 0.50, 0.60, 0.70]
-IMBALANCE_THRESHOLD_PCT = 35.0
+# ---------------------------------------------------------------------------
+# LLM API setup (RFC-agnostic: any provider accepting {model, messages} JSON
+# over POST works, e.g. OpenRouter). Key is read from an environment
+# variable -- never hardcoded.
+# ---------------------------------------------------------------------------
+LLM_API_URL = os.environ.get("LLM_API_URL", "https://openrouter.ai/api/v1/chat/completions")
+LLM_MODEL = os.environ.get("LLM_MODEL", "openai/gpt-4o-mini")
+LLM_API_KEY_ENV = "LLM_API_KEY"
 
-NUMERIC_COLS = [
-    "word_count", "char_count", "avg_word_len",
-    "capital_ratio", "digit_count", "punct_count", "exclaim_count",
+# ---------------------------------------------------------------------------
+# Feature encoding -- MUST exactly mirror part2_processing.build_features_and_labels()
+# so a hand-crafted record is encoded identically to how training data was.
+# Column order captured directly from a real training run (see module test).
+# ---------------------------------------------------------------------------
+BASE_NUMERIC_FEATURES = ["avg_word_len", "capital_ratio", "digit_count", "punct_count", "exclaim_count"]
+ORDINAL_MAP = {"Low": 0, "Medium": 1, "High": 2}
+WEEKDAY_DUMMY_COLUMNS = [
+    "weekday_Monday", "weekday_Saturday", "weekday_Sunday",
+    "weekday_Thursday", "weekday_Tuesday", "weekday_Wednesday",
+]  # "Friday" is the drop_first=True baseline -- all-zero row means Friday.
+ALL_FEATURE_COLUMNS = BASE_NUMERIC_FEATURES + ["digit_level_enc"] + WEEKDAY_DUMMY_COLUMNS
+
+# ---------------------------------------------------------------------------
+# JSON schema for the LLM's explanation (Track C: >=5 required scalar fields)
+# ---------------------------------------------------------------------------
+EXPLANATION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "prediction_label": {"type": "string"},
+        "confidence_level": {"type": "string", "enum": ["low", "medium", "high"]},
+        "top_reason": {"type": "string"},
+        "second_reason": {"type": "string"},
+        "next_step": {"type": "string"},
+    },
+    "required": ["prediction_label", "confidence_level", "top_reason", "second_reason", "next_step"],
+}
+
+FALLBACK_EXPLANATION = {k: None for k in EXPLANATION_SCHEMA["required"]}
+
+SYSTEM_PROMPT = (
+    "You are an assistant that explains a spam/ham email classifier's predictions "
+    "to a non-technical support analyst. You will be given the model's input feature "
+    "values, its predicted class, and its predicted probability for that class. "
+    "Respond with ONLY a single valid JSON object (no markdown fences, no prose "
+    "before or after) with exactly these fields: "
+    '"prediction_label" (string: the predicted class), '
+    '"confidence_level" (string: one of "low", "medium", "high", based on the '
+    "predicted probability), "
+    '"top_reason" (string: the single most likely feature-based reason for this '
+    "prediction, referencing the actual feature values given), "
+    '"second_reason" (string: a second contributing reason), '
+    '"next_step" (string: a short recommended action for the analyst, e.g. '
+    '"no action needed" or "flag for manual review"). '
+    "Do not invent feature values that were not provided. Do not include any text "
+    "outside the JSON object."
+)
+
+USER_PROMPT_TEMPLATE = (
+    "Feature values:\n{feature_json}\n\n"
+    "Model prediction: {predicted_label}\n"
+    "Predicted probability for that class: {probability:.4f}\n\n"
+    "Explain this prediction as instructed."
+)
+
+
+# ---------------------------------------------------------------------------
+# PII guardrail (exact pattern specified by the assignment)
+# ---------------------------------------------------------------------------
+def has_pii(text):
+    email_pattern = r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+"
+    phone_pattern = r"\b\d{10}\b|\b\d{3}[-.\s]\d{3}[-.\s]\d{4}\b"
+    return bool(re.search(email_pattern, text) or re.search(phone_pattern, text))
+
+
+# ---------------------------------------------------------------------------
+# LLM call
+# ---------------------------------------------------------------------------
+def _mock_llm_response(user_prompt, temperature):
+    """Used only when LLM_API_KEY is not set, so the pipeline can still be
+    demonstrated end-to-end. Clearly distinguishable from a real response --
+    every field is prefixed "[MOCK]" and this function is never used when a
+    real API key is configured."""
+    logger.warning("call_llm: LLM_API_KEY not set -- returning a MOCK response, not a real LLM call")
+    predicted = "spam" if "spam" in user_prompt.lower() else "ham"
+    jitter = "" if temperature == 0 else " (mock jitter for temp=0.7)"
+    return json.dumps({
+        "prediction_label": f"[MOCK] {predicted}",
+        "confidence_level": "medium",
+        "top_reason": f"[MOCK] simulated reason, no live LLM_API_KEY configured{jitter}",
+        "second_reason": "[MOCK] simulated secondary reason",
+        "next_step": "[MOCK] set LLM_API_KEY and re-run for a real explanation",
+    })
+
+
+def call_llm(system_prompt, user_prompt, temperature=0.0, max_tokens=512,
+             api_url=None, api_key=None):
+    """Reusable LLM call. Returns the assistant's raw text content, or None
+    on a non-200 response. `api_url`/`api_key` can be passed explicitly (e.g.
+    from a form in the web UI); if omitted, falls back to LLM_API_URL /
+    LLM_API_KEY environment variables. Falls back to a labeled mock if no key
+    is available from either source (see module docstring). The key is never
+    logged or echoed back in any response/template."""
+    api_url = api_url or LLM_API_URL
+    api_key = api_key or os.environ.get(LLM_API_KEY_ENV)
+    if not api_key:
+        return _mock_llm_response(user_prompt, temperature)
+    payload = {
+        "model": LLM_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    logger.info("ACTION call_llm: url=%s model=%s temperature=%.2f", api_url, LLM_MODEL, temperature)
+    response = requests.post(api_url, headers=headers, json=payload, timeout=30)
+    if response.status_code != 200:
+        logger.error("call_llm: non-200 response: %d %s", response.status_code, response.text[:300])
+        print(f"LLM API error: status_code={response.status_code}")
+        return None
+    return response.json()["choices"][0]["message"]["content"]
+
+
+def parse_and_validate(raw_response):
+    """Strip/parse/validate an LLM response against EXPLANATION_SCHEMA.
+    Returns (parsed_dict_or_fallback, status_str) where status_str is one of
+    'pass', 'json_error', 'schema_error', 'no_response'."""
+    if raw_response is None:
+        return dict(FALLBACK_EXPLANATION), "no_response"
+
+    text = raw_response.strip()
+    # Some providers wrap JSON in markdown fences even when told not to;
+    # strip those defensively without masking a genuine formatting failure.
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
+
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        logger.warning("parse_and_validate: JSON decode error: %s", exc)
+        print(f"JSON decode error: {exc}")
+        return dict(FALLBACK_EXPLANATION), "json_error"
+
+    try:
+        jsonschema.validate(parsed, EXPLANATION_SCHEMA)
+    except jsonschema.ValidationError as exc:
+        logger.warning("parse_and_validate: schema validation error: %s", exc.message)
+        print(f"Schema validation error: {exc.message}")
+        return dict(FALLBACK_EXPLANATION), "schema_error"
+
+    return parsed, "pass"
+
+
+# ---------------------------------------------------------------------------
+# Feature encoding + model loading
+# ---------------------------------------------------------------------------
+def encode_record(features):
+    """Encode a hand-crafted feature dict into the exact column layout
+    best_model.pkl was trained on. `features` must contain the 5 base
+    numeric features plus 'digit_level' (Low/Medium/High) and 'weekday'
+    (a day name; use 'Friday' for the drop_first baseline)."""
+    row = {col: 0 for col in ALL_FEATURE_COLUMNS}
+    for f in BASE_NUMERIC_FEATURES:
+        row[f] = features[f]
+    row["digit_level_enc"] = ORDINAL_MAP[features["digit_level"]]
+    weekday_col = f"weekday_{features['weekday']}"
+    if weekday_col in WEEKDAY_DUMMY_COLUMNS:
+        row[weekday_col] = 1
+    return pd.DataFrame([row], columns=ALL_FEATURE_COLUMNS)
+
+
+def load_model(model_path):
+    logger.info("ACTION load_model: %s", model_path)
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(
+            f"{model_path} not found. Run Part 3 first (or point this at an "
+            "existing best_model.pkl)."
+        )
+    return joblib.load(model_path)
+
+
+# ---------------------------------------------------------------------------
+# Hand-crafted demo inputs (3, as required)
+# ---------------------------------------------------------------------------
+SAMPLE_INPUTS = [
+    {
+        "label": "Digit-and-punctuation-heavy, Saturday",
+        "features": {
+            "avg_word_len": 4.1, "capital_ratio": 0.0, "digit_count": 42,
+            "punct_count": 58, "exclaim_count": 3, "digit_level": "High", "weekday": "Saturday",
+        },
+    },
+    {
+        "label": "Low digit/punct density, midweek",
+        "features": {
+            "avg_word_len": 5.3, "capital_ratio": 0.0, "digit_count": 2,
+            "punct_count": 9, "exclaim_count": 0, "digit_level": "Low", "weekday": "Tuesday",
+        },
+    },
+    {
+        "label": "Borderline / moderate signals",
+        "features": {
+            "avg_word_len": 4.7, "capital_ratio": 0.0, "digit_count": 12,
+            "punct_count": 24, "exclaim_count": 1, "digit_level": "Medium", "weekday": "Friday",
+        },
+    },
 ]
 
-REQUIRED_COLS = {"Subject", "Message", "Spam/Ham"}
+# PII guardrail demo inputs (assignment requires >=2: one blocked, one clean)
+PII_TEST_INPUTS = [
+    ("Contact John at john.doe@example.com for details.", True),   # should be BLOCKED
+    ("This message has moderate digit and punctuation counts.", False),  # should PROCEED
+]
 
 
-class PipelineError(ValueError):
-    """Raised for user-facing, expected problems with the uploaded file."""
+def confidence_from_proba(p):
+    if p >= 0.85:
+        return "high"
+    if p >= 0.65:
+        return "medium"
+    return "low"
 
 
-def load_and_clean(file_like):
-    logger.info("ACTION load_and_clean: parsing uploaded CSV")
-    try:
-        df = pd.read_csv(file_like)
-    except Exception as exc:
-        logger.error("load_and_clean: failed to parse CSV (%s)", exc)
-        raise PipelineError(f"Could not parse file as CSV ({exc}).")
+def run_pipeline(model_path, api_url=None, api_key=None):
+    """api_url/api_key: optional, e.g. submitted via the web UI's form. Falls
+    back to LLM_API_URL / LLM_API_KEY environment variables if not given, and
+    to the labeled mock if neither source provides a key. The key is never
+    included in the returned dict (so it can't end up rendered in a template)
+    and never logged -- only whether a real key was used at all."""
+    logger.info("ACTION run_pipeline: starting, model=%s, api_url=%s, using_form_key=%s", model_path, api_url or LLM_API_URL, bool(api_key))
+    model = load_model(model_path)
 
-    logger.info("load_and_clean: parsed CSV with shape=%s columns=%s", df.shape, list(df.columns))
-
-    missing = REQUIRED_COLS - set(df.columns)
-    if missing:
-        logger.error("load_and_clean: missing required column(s): %s", sorted(missing))
-        raise PipelineError(
-            f"CSV is missing required column(s): {', '.join(sorted(missing))}. "
-            f"Expected at least: {', '.join(sorted(REQUIRED_COLS))}."
-        )
-
-    rows_before = len(df)
-    df = df.drop_duplicates(subset=["Subject", "Message", "Spam/Ham"], keep="first")
-    logger.info("load_and_clean: dropped %d content-duplicate rows (%d -> %d)",
-                rows_before - len(df), rows_before, len(df))
-
-    df["Subject"] = df["Subject"].fillna("")
-    df["Message"] = df["Message"].fillna("")
-    df["Spam/Ham"] = df["Spam/Ham"].astype(str).str.strip().str.lower()
-
-    rows_before_label_filter = len(df)
-    df = df[df["Spam/Ham"].isin(["spam", "ham"])]
-    if len(df) != rows_before_label_filter:
-        logger.info("load_and_clean: dropped %d rows with invalid Spam/Ham label",
-                    rows_before_label_filter - len(df))
-
-    if "Date" in df.columns:
-        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-
-    df = df.reset_index(drop=True)
-
-    if len(df) < 20:
-        logger.error("load_and_clean: only %d usable rows after cleaning (need >= 20)", len(df))
-        raise PipelineError(
-            "Not enough usable rows after cleaning (need at least 20 rows with "
-            "Spam/Ham equal to 'spam' or 'ham')."
-        )
-    if df["Spam/Ham"].nunique() < 2:
-        logger.error("load_and_clean: only one class present after cleaning")
-        raise PipelineError(
-            "The file needs both spam and ham examples to train/evaluate a classifier."
-        )
-
-    logger.info("load_and_clean: cleaning complete, final shape=%s", df.shape)
-    return df
-
-
-def engineer_features(df):
-    logger.info("ACTION engineer_features: computing text-derived numeric features for %d rows", len(df))
-    df = df.copy()
-    df["text"] = (df["Subject"].astype(str) + " " + df["Message"].astype(str)).str.strip()
-    df["word_count"] = df["text"].str.split().str.len()
-    df["char_count"] = df["text"].str.len()
-    df["avg_word_len"] = df["char_count"] / df["word_count"].replace(0, np.nan)
-    df["capital_ratio"] = df["text"].apply(lambda t: sum(1 for c in t if c.isupper()) / max(len(t), 1))
-    df["digit_count"] = df["text"].apply(lambda t: sum(c.isdigit() for c in t))
-    df["punct_count"] = df["text"].apply(lambda t: sum(1 for c in t if c in "!?.,;:$%"))
-    df["exclaim_count"] = df["text"].apply(lambda t: t.count("!"))
-
-    for col in NUMERIC_COLS:
-        if df[col].isnull().any():
-            n_null = int(df[col].isnull().sum())
-            df[col] = df[col].fillna(df[col].median())
-            logger.info("engineer_features: filled %d nulls in %s with median", n_null, col)
-
-    logger.info("engineer_features: done, columns added=%s", NUMERIC_COLS)
-    return df
-
-def _new_run_dir():
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    run_dir = os.path.join(RUN_DIR_ROOT, f"part2_{run_id}")
-    os.makedirs(run_dir, exist_ok=True)
-    return run_dir
-
-def _fig_to_base64(fig, save_path=None):
-    if save_path:
-        fig.savefig(save_path, dpi=130, bbox_inches="tight")
-        logger.info("Saved chart to %s", save_path)
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=130, bbox_inches="tight")
-    plt.close(fig)
-    buf.seek(0)
-    return base64.b64encode(buf.read()).decode("utf-8")
-
-def load_cleaned(csv_path):
-    logger.info("ACTION load_cleaned: reading %s", csv_path)
-    if not os.path.exists(csv_path):
-        raise PipelineError(f"cleaned_data.csv not found at {csv_path}. Run Part 1 first.")
-    # keep_default_na=False: Part 1 deliberately stores "" (not NaN) for subject/body-empty
-    # emails -- see Part 1 README's CSV serialization note. Re-reading with default NA
-    # handling would reintroduce those as spurious nulls.
-    df = pd.read_csv(csv_path, keep_default_na=False, na_values=[])
-    required = {"word_count", "Spam/Ham", "Date", "digit_count", "avg_word_len",
-                "capital_ratio", "punct_count", "exclaim_count"}
-    missing = required - set(df.columns)
-    if missing:
-        raise PipelineError(f"cleaned_data.csv is missing required column(s): {sorted(missing)}")
-    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-    logger.info("load_cleaned: shape=%s", df.shape)
-    return df
-
-
-def build_features_and_labels(df):
-    """Builds X, y_reg, y_clf on a shared, leak-free feature matrix.
-
-    Design notes (see README for full justification):
-      - y_reg = word_count (continuous). y_clf = Spam/Ham binarized (spam=1/ham=0) --
-        a natural existing binary column, used instead of median-binarizing y_reg.
-      - char_count is EXCLUDED from X: it correlates with word_count at r=0.996
-        (Part 1 finding) -- essentially the same measurement, so including it would be
-        near-definitional leakage for the regression target.
-      - Spam/Ham / Subject / Message / text / Date are excluded from X as raw/target
-        columns; two features are instead *derived* from Date/digit_count specifically
-        to have real categorical columns to encode:
-          - weekday (nominal, no natural order)      -> one-hot, drop_first=True
-          - digit_level (ordinal: Low<Medium<High)    -> label-encoded 0/1/2
-    """
-    logger.info("ACTION build_features_and_labels: engineering categorical features")
-    df = df.copy()
-    df["weekday"] = df["Date"].dt.day_name()
-    df["digit_level"] = pd.cut(df["digit_count"], bins=[-1, 5, 20, np.inf],
-                                labels=["Low", "Medium", "High"])
-
-    y_reg = df["word_count"].astype(float)
-    y_clf = (df["Spam/Ham"].astype(str).str.lower() == "spam").astype(int)
-
-    # Ordinal label encoding -- order Low(0) < Medium(1) < High(2) reflects increasing
-    # digit density, a real ordering (unlike e.g. city names), so integer encoding is valid.
-    ordinal_map = {"Low": 0, "Medium": 1, "High": 2}
-    df["digit_level_enc"] = df["digit_level"].map(ordinal_map)
-
-    # Nominal one-hot encoding -- weekday has no natural order, so label-encoding it would
-    # falsely imply e.g. "Friday > Monday" to a linear/logistic model. drop_first=True avoids
-    # the dummy-variable trap (perfect multicollinearity with the intercept).
-    weekday_dummies = pd.get_dummies(df["weekday"], prefix="weekday", drop_first=True)
-
-    X = pd.concat([df[BASE_NUMERIC_FEATURES], df[["digit_level_enc"]], weekday_dummies], axis=1)
-    logger.info("build_features_and_labels: X shape=%s, columns=%s", X.shape, X.columns.tolist())
-    return X, y_reg, y_clf
-
-
-def split_and_scale(X, y_reg, y_clf, test_size=0.2, random_state=42):
-    logger.info("ACTION split_and_scale: test_size=%.2f random_state=%d", test_size, random_state)
-    X_train, X_test, y_reg_train, y_reg_test, y_clf_train, y_clf_test = train_test_split(
-        X, y_reg, y_clf, test_size=test_size, random_state=random_state
+    # --- call_llm smoke test (required demonstration) ---
+    smoke_response = call_llm(
+        "Reply with only the word: hello", "Reply with only the word: hello",
+        temperature=0.0, max_tokens=10, api_url=api_url, api_key=api_key,
     )
-    # Scaler fit on TRAIN ONLY. Fitting on the full dataset (train+test) would leak
-    # test-set mean/variance into the training process -- the model would implicitly
-    # "see" statistics about rows it's supposed to be evaluated on, inflating reported
-    # performance relative to how the model would behave on truly unseen data.
-    scaler = StandardScaler()
-    scaler.fit(X_train)
-    X_train_s = scaler.transform(X_train)
-    X_test_s = scaler.transform(X_test)
-    logger.info("split_and_scale: train=%d test=%d rows", len(X_train), len(X_test))
-    return X_train_s, X_test_s, y_reg_train, y_reg_test, y_clf_train, y_clf_test, X.columns.tolist()
+    logger.info("run_pipeline: call_llm smoke test response=%r", smoke_response)
 
-
-def run_regression(X_train_s, X_test_s, y_reg_train, y_reg_test, feature_names):
-    logger.info("ACTION run_regression: fitting Linear + Ridge regression")
-    lr = LinearRegression().fit(X_train_s, y_reg_train)
-    pred_lr = lr.predict(X_test_s)
-    mse_lr = mean_squared_error(y_reg_test, pred_lr)
-    r2_lr = r2_score(y_reg_test, pred_lr)
-
-    ridge = Ridge(alpha=1.0).fit(X_train_s, y_reg_train)
-    pred_ridge = ridge.predict(X_test_s)
-    mse_ridge = mean_squared_error(y_reg_test, pred_ridge)
-    r2_ridge = r2_score(y_reg_test, pred_ridge)
-
-    coef_table = (
-        pd.DataFrame({"feature": feature_names, "lr_coef": lr.coef_, "ridge_coef": ridge.coef_})
-        .assign(abs_lr_coef=lambda d: d["lr_coef"].abs())
-        .sort_values("abs_lr_coef", ascending=False)
-        .drop(columns="abs_lr_coef")
-    )
-    top3 = coef_table.head(3).to_dict(orient="records")
-
-    logger.info("run_regression: OLS MSE=%.3f R2=%.4f | Ridge MSE=%.3f R2=%.4f",
-                mse_lr, r2_lr, mse_ridge, r2_ridge)
-
-    fig, ax = plt.subplots(figsize=(6.5, 5))
-    ax.scatter(y_reg_test, pred_lr, alpha=0.15, s=10)
-    lims = [0, np.quantile(y_reg_test, 0.99)]
-    ax.plot(lims, lims, "r--", linewidth=1)
-    ax.set_xlim(lims); ax.set_ylim(lims)
-    ax.set_xlabel("Actual word_count"); ax.set_ylabel("Predicted word_count")
-    ax.set_title(f"Linear Regression: Actual vs Predicted (R2={r2_lr:.3f})")
-
-    return {
-        "mse_lr": mse_lr, "r2_lr": r2_lr, "mse_ridge": mse_ridge, "r2_ridge": r2_ridge,
-        "coef_table": coef_table, "top3": top3, "scatter_fig": fig,
-    }
-
-
-def check_class_balance(y_clf_train):
-    logger.info("ACTION check_class_balance")
-    vc = y_clf_train.value_counts()
-    pct = (vc / len(y_clf_train) * 100).round(2)
-    minority_pct = pct.min()
-    needs_action = minority_pct < IMBALANCE_THRESHOLD_PCT
-    logger.info("check_class_balance: counts=%s pct=%s minority=%.2f%% needs_action=%s",
-                vc.to_dict(), pct.to_dict(), minority_pct, needs_action)
-    return {"counts_before": vc.to_dict(), "pct_before": pct.to_dict(),
-            "minority_pct": minority_pct, "needs_action": needs_action}
-
-
-def run_classification(X_train_s, X_test_s, y_clf_train, y_clf_test, run_dir):
-    logger.info("ACTION run_classification: fitting Logistic Regression (C=1.0)")
-    balance_info = check_class_balance(y_clf_train)
-
-    # class_weight='balanced' used regardless: costs nothing (a weighting scheme, not
-    # resampling -- no synthetic rows, so "before"/"after" class counts are identical),
-    # and provides margin if class balance drifts in future data. SMOTE was not applied
-    # since the imbalance threshold (35%) wasn't crossed -- see README.
-    logit = LogisticRegression(max_iter=1000, C=1.0, class_weight="balanced", random_state=42)
-    logit.fit(X_train_s, y_clf_train)
-    pred = logit.predict(X_test_s)
-    proba = logit.predict_proba(X_test_s)[:, 1]
-
-    cm = confusion_matrix(y_clf_test, pred)
-    report = classification_report(y_clf_test, pred, target_names=["ham", "spam"], output_dict=True)
-    for cls in ["ham", "spam"]:
-        report[cls]["support"] = int(report[cls]["support"])
-    auc = roc_auc_score(y_clf_test, proba)
-    fpr, tpr, _ = roc_curve(y_clf_test, proba)
-
-    logger.info("run_classification: AUC=%.4f accuracy=%.4f", auc, report["accuracy"])
-
-    fig, ax = plt.subplots(figsize=(4.5, 4))
-    import seaborn as sns
-    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", ax=ax,
-                xticklabels=["ham", "spam"], yticklabels=["ham", "spam"])
-    ax.set_xlabel("Predicted"); ax.set_ylabel("Actual"); ax.set_title("Confusion Matrix (C=1.0)")
-    cm_chart = _fig_to_base64(fig, os.path.join(run_dir, "06_confusion_matrix_clf.png"))
-
-    fig, ax = plt.subplots(figsize=(5.5, 5))
-    ax.plot(fpr, tpr, label=f"Logistic Regression (AUC = {auc:.3f})")
-    ax.plot([0, 1], [0, 1], "k--", alpha=0.4)
-    ax.set_xlabel("False Positive Rate"); ax.set_ylabel("True Positive Rate")
-    ax.set_title("ROC Curve - Spam Classification (Part 2)")
-    ax.annotate(f"AUC = {auc:.3f}", xy=(0.55, 0.15))
-    ax.legend()
-    roc_chart = _fig_to_base64(fig, os.path.join(run_dir, "07_roc_curve.png"))
-
-    # Threshold sensitivity
-    thresh_rows = []
-    for t in THRESHOLDS:
-        preds_t = (proba >= t).astype(int)
-        thresh_rows.append({
-            "threshold": t,
-            "precision": precision_score(y_clf_test, preds_t, zero_division=0),
-            "recall": recall_score(y_clf_test, preds_t, zero_division=0),
-            "f1": f1_score(y_clf_test, preds_t, zero_division=0),
+    # --- PII guardrail demonstration ---
+    guardrail_results = []
+    for text, expected_block in PII_TEST_INPUTS:
+        blocked = has_pii(text)
+        if blocked:
+            print("Input blocked: PII detected.")
+        guardrail_results.append({
+            "input": text, "blocked": blocked, "expected_block": expected_block,
+            "correct": blocked == expected_block,
         })
-    thresh_df = pd.DataFrame(thresh_rows)
-    best_threshold = float(thresh_df.loc[thresh_df["f1"].idxmax(), "threshold"])
-    logger.info("run_classification: F1-maximizing threshold=%.2f", best_threshold)
+        logger.info("guardrail: input=%r blocked=%s expected=%s", text, blocked, expected_block)
 
+    # --- Main pipeline: predict + explain for each of the 3 hand-crafted inputs ---
+    rows = []
+    temp_comparison_rows = []
+    for sample in SAMPLE_INPUTS:
+        feats = sample["features"]
+        X = encode_record(feats)
+        pred = model.predict(X)[0]
+        proba = model.predict_proba(X)[0]
+        classes = list(model.classes_)
+        pred_idx = classes.index(pred)
+        pred_proba = float(proba[pred_idx])
+        predicted_label = "spam" if pred == 1 else "ham"
+
+        feature_json = json.dumps(feats)
+        user_prompt = USER_PROMPT_TEMPLATE.format(
+            feature_json=feature_json, predicted_label=predicted_label, probability=pred_proba
+        )
+
+        # PII guardrail applied before every LLM call, per spec.
+        if has_pii(user_prompt):
+            print("Input blocked: PII detected.")
+            explanation, status = dict(FALLBACK_EXPLANATION), "blocked"
+            raw_response = None
+        else:
+            raw_response = call_llm(SYSTEM_PROMPT, user_prompt, temperature=0.0, max_tokens=300,
+                                     api_url=api_url, api_key=api_key)
+            explanation, status = parse_and_validate(raw_response)
+
+        print(f"--- {sample['label']} ---")
+        print("Input features:", feats)
+        print("Predicted class:", predicted_label, "probability:", pred_proba)
+        print("Raw LLM response:", raw_response)
+        print("Validation status:", status)
+
+        rows.append({
+            "label": sample["label"], "features": feats, "predicted_label": predicted_label,
+            "probability": pred_proba, "raw_response": raw_response,
+            "explanation": explanation, "status": status,
+        })
+
+        # --- Temperature A/B comparison (temp=0 vs temp=0.7) for this input ---
+        resp_t0 = raw_response  # already have temp=0 result from above
+        raw_t07 = call_llm(SYSTEM_PROMPT, user_prompt, temperature=0.7, max_tokens=300,
+                            api_url=api_url, api_key=api_key)
+        temp_comparison_rows.append({
+            "label": sample["label"], "output_t0": resp_t0, "output_t07": raw_t07,
+        })
+
+    logger.info("run_pipeline: complete")
     return {
-        "balance_info": balance_info, "cm": cm, "report": report, "auc": auc,
-        "cm_chart": cm_chart, "roc_chart": roc_chart, "thresh_df": thresh_df,
-        "best_threshold": best_threshold, "proba": proba, "model": logit,
-    }
-
-
-def run_regularization_experiment(X_train_s, X_test_s, y_clf_train, y_clf_test, proba_c1):
-    logger.info("ACTION run_regularization_experiment: fitting Logistic Regression (C=0.01)")
-    logit_c01 = LogisticRegression(max_iter=1000, C=0.01, class_weight="balanced", random_state=42)
-    logit_c01.fit(X_train_s, y_clf_train)
-    pred_c01 = logit_c01.predict(X_test_s)
-    proba_c01 = logit_c01.predict_proba(X_test_s)[:, 1]
-
-    pred_c1 = (proba_c1 >= 0.5).astype(int)
-    comparison = pd.DataFrame([
-        {"model": "C=1.0", "precision": precision_score(y_clf_test, pred_c1),
-         "recall": recall_score(y_clf_test, pred_c1), "auc": roc_auc_score(y_clf_test, proba_c1)},
-        {"model": "C=0.01", "precision": precision_score(y_clf_test, pred_c01),
-         "recall": recall_score(y_clf_test, pred_c01), "auc": roc_auc_score(y_clf_test, proba_c01)},
-    ])
-    logger.info("run_regularization_experiment: comparison=%s", comparison.to_dict(orient="records"))
-    return {"comparison": comparison, "proba_c01": proba_c01}
-
-
-def bootstrap_auc_diff(y_clf_test, proba_c1, proba_c01, n_boot=500, seed=42):
-    logger.info("ACTION bootstrap_auc_diff: n_boot=%d", n_boot)
-    rng = np.random.RandomState(seed)
-    y_arr = np.asarray(y_clf_test)
-    diffs = []
-    for _ in range(n_boot):
-        idx = rng.choice(len(y_arr), size=len(y_arr), replace=True)
-        y_s = y_arr[idx]
-        if len(np.unique(y_s)) < 2:
-            continue
-        auc1 = roc_auc_score(y_s, proba_c1[idx])
-        auc01 = roc_auc_score(y_s, proba_c01[idx])
-        diffs.append(auc1 - auc01)
-    diffs = np.array(diffs)
-    mean_diff = float(diffs.mean())
-    ci_low, ci_high = np.percentile(diffs, [2.5, 97.5])
-    excludes_zero = bool(ci_low > 0 or ci_high < 0)
-    logger.info("bootstrap_auc_diff: n_valid=%d mean=%.4f CI=[%.4f, %.4f] excludes_zero=%s",
-                len(diffs), mean_diff, ci_low, ci_high, excludes_zero)
-    return {"n_valid": len(diffs), "mean_diff": mean_diff, "ci_low": float(ci_low),
-            "ci_high": float(ci_high), "excludes_zero": excludes_zero}
-
-def run_pipeline(file_like):
-    """End-to-end Part 2: cleaned_data.csv -> features/labels -> regression +
-    classification models -> charts + tables, saved to a timestamped run dir."""
-
-    logger.info("ACTION run_pipeline: starting full pipeline")
-    run_dir = _new_run_dir()
-    logger.info("run_pipeline: output directory for this run -> %s", run_dir)
-
-    # Execute the complete Part 1 preprocessing pipeline:
-    # - Clean the raw email dataset
-    # - Remove duplicates and invalid records
-    # - Handle missing values
-    df = load_and_clean(file_like)
-    
-    # Generate engineered features required for ML models
-    # (e.g., word_count, char_count, digit_count, punctuation count, etc.)
-    df = engineer_features(df)
-
-    # Create a timestamped output directory for the current execution
-    run_dir = _new_run_dir()
-    
-    # Save the cleaned and feature-engineered dataset.
-    # This file serves as the input dataset for Part 2 (Regression & Classification).
-    cleaned_path = os.path.join(run_dir, "cleaned_data.csv")
-    df.to_csv(cleaned_path, index=False)
-    logger.info("run_pipeline: saved cleaned dataset -> %s (%d rows)", cleaned_path, len(df))
-
-    # Load the cleaned dataset generated in Part 1.
-    # Part 2 uses this processed dataset instead of the raw CSV
-    # to ensure consistent preprocessing and feature engineering.
-    df = load_cleaned(cleaned_path)
-    
-    X, y_reg, y_clf = build_features_and_labels(df)
-    X_train_s, X_test_s, y_reg_train, y_reg_test, y_clf_train, y_clf_test, feat_names = \
-        split_and_scale(X, y_reg, y_clf)
-
-    reg_results = run_regression(X_train_s, X_test_s, y_reg_train, y_reg_test, feat_names)
-    reg_scatter_b64 = _fig_to_base64(reg_results["scatter_fig"], os.path.join(run_dir, "05_regression_scatter.png"))
-
-    clf_results = run_classification(X_train_s, X_test_s, y_clf_train, y_clf_test, run_dir)
-    reg_experiment = run_regularization_experiment(
-        X_train_s, X_test_s, y_clf_train, y_clf_test, clf_results["proba"])
-    boot = bootstrap_auc_diff(y_clf_test, clf_results["proba"], reg_experiment["proba_c01"])
-
-    logger.info("run_pipeline: complete, outputs saved to %s", run_dir)
-
-    return {
-        "cleaned_path": cleaned_path,
-        "run_dir": run_dir,
-        "feature_names": feat_names,
-        "regression": {
-            "mse_lr": reg_results["mse_lr"], "r2_lr": reg_results["r2_lr"],
-            "mse_ridge": reg_results["mse_ridge"], "r2_ridge": reg_results["r2_ridge"],
-            "coef_table": reg_results["coef_table"].to_dict(orient="records"),
-            "top3": reg_results["top3"], "scatter_chart": reg_scatter_b64,
-        },
-        "classification": {
-            "balance_info": clf_results["balance_info"],
-            "cm": clf_results["cm"].tolist(),
-            "report": clf_results["report"],
-            "auc": clf_results["auc"],
-            "cm_chart": clf_results["cm_chart"],
-            "roc_chart": clf_results["roc_chart"],
-            "thresh_table": clf_results["thresh_df"].to_dict(orient="records"),
-            "best_threshold": clf_results["best_threshold"],
-        },
-        "regularization": {
-            "comparison": reg_experiment["comparison"].to_dict(orient="records"),
-        },
-        "bootstrap": boot,
+        "smoke_test_response": smoke_response,
+        "guardrail_results": guardrail_results,
+        "rows": rows,
+        "temp_comparison_rows": temp_comparison_rows,
+        "using_mock": not bool(api_key or os.environ.get(LLM_API_KEY_ENV)),
+        "api_url_used": api_url or LLM_API_URL,
     }

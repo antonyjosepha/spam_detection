@@ -34,60 +34,47 @@ def render(template_name, **kwargs):
 
 class SpamDetectionApp:
 
+    def __init__(self, model_path, api_url, api_key):
+        self.model_path = model_path
+        self.api_url = api_url
+        self.api_key = api_key
+
     @cherrypy.expose
     def index(self, error=None):
-        logger.info("ACTION GET / from %s%s", cherrypy.request.remote.ip,
-                    f" (error shown: {error})" if error else "")
-        return render("index.html", error=error)
-
-    @cherrypy.expose
-    def upload(self, csvfile=None):
         client_ip = cherrypy.request.remote.ip
-
-        if csvfile is None or not getattr(csvfile, "filename", ""):
-            logger.warning("ACTION POST /upload from %s: no file provided", client_ip)
-            return render("index.html", error="Please choose a CSV file to upload.")
-
-        logger.info("ACTION POST /upload from %s: filename=%s", client_ip, csvfile.filename)
-
-        if not csvfile.filename.lower().endswith(".csv"):
-            logger.warning("POST /upload from %s: rejected non-csv filename=%s",
-                            client_ip, csvfile.filename)
-            return render("index.html", error="Please upload a file with a .csv extension.")
-
+        logger.info("ACTION POST /part4 from %s: model_path=%s llm_api_url=%s key_submitted=%s", client_ip, self.model_path, self.api_url or "(default)", bool(self.api_key))
+        if not self.model_path:
+            logger.warning("POST /part4 from %s: no model_path provided", client_ip)
+            return render("index.html", error="No Part 3 model to explain. Run Part 3 first.")
         try:
-            raw_bytes = csvfile.file.read()
-            logger.info("POST /upload from %s: read %d bytes for %s",
-                        client_ip, len(raw_bytes), csvfile.filename)
-            file_like = io.BytesIO(raw_bytes)
-            result = proc.run_pipeline(file_like)
-        except proc.PipelineError as exc:
-            logger.warning("POST /upload from %s: pipeline rejected file %s (%s)",
-                            client_ip, csvfile.filename, exc)
+            result = proc.run_pipeline(
+                self.model_path,
+                api_url=self.api_url,
+                api_key=self.api_key,
+            )
+        except FileNotFoundError as exc:
+            logger.warning("POST from %s: %s", client_ip, exc)
             return render("index.html", error=str(exc))
         except Exception as exc:
-            logger.exception("POST /upload from %s: unexpected error processing %s",
-                              client_ip, csvfile.filename)
-            return render(
-                "index.html",
-                error=f"Unexpected error while processing the file: {exc}",
-            )
-
-        logger.info("POST /part2 from %s: success, AUC=%.4f R2(reg)=%.4f",
-                    client_ip, result["classification"]["auc"], result["regression"]["r2_lr"])
-        return render(
-            "results.html",
-            cleaned_csv_path=result["cleaned_path"],
-            run_dir=result["run_dir"],
-            feature_names=result["feature_names"],
-            regression=result["regression"],
-            classification=result["classification"],
-            regularization=result["regularization"],
-            bootstrap=result["bootstrap"],
-        )
+            logger.exception("POST from %s: unexpected error processing %s", client_ip, self.model_path)
+            return render("index.html", error=f"Unexpected error: {exc}")
+        logger.info("POST from %s: success, using_mock=%s", client_ip, result["using_mock"])
+        return render("results.html", **result)
 
 
 def main():
+
+    # get model path, api url and key
+    from configobj import ConfigObj
+    file_path = os.path.join("meta.ini")
+    if not os.path.exists(file_path):
+        logger.exception("Missing configuration.")
+        return False
+    # read mailsource configuration
+    system_conf_obj = ConfigObj(file_path)
+    API_URL = system_conf_obj["llm"]["api_url"] 
+    API_KEY = system_conf_obj["llm"]["api_key"] 
+    MODEL_PATH = system_conf_obj["llm"]["model_path"] 
     cherrypy.config.update({
         "server.socket_host": "0.0.0.0",
         "server.socket_port": int(os.environ.get("PORT", 8080)),
@@ -95,7 +82,6 @@ def main():
         "server.thread_pool": 8,
         "log.screen": True,
     })
-
     conf = {
         "/": {
             "tools.sessions.on": False,
@@ -106,11 +92,9 @@ def main():
             "tools.staticdir.dir": STATIC_DIR,
         },
     }
-
-    logger.info("ACTION server startup: listening on %s:%s",
-                cherrypy.config["server.socket_host"], cherrypy.config["server.socket_port"])
+    logger.info("ACTION server startup: listening on %s:%s", cherrypy.config["server.socket_host"], cherrypy.config["server.socket_port"])
     try:
-        cherrypy.quickstart(SpamDetectionApp(), "/", conf)
+        cherrypy.quickstart(SpamDetectionApp(MODEL_PATH, API_URL, API_KEY), "/", conf)
     finally:
         logger.info("ACTION server shutdown")
 
