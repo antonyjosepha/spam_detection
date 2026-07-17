@@ -63,7 +63,7 @@ python server.py
 Open:
 
 ```
-http://localhost:8080/part3
+http://localhost:8080
 ```
 
 ---
@@ -75,7 +75,7 @@ processing.py
 server.py
 templates/
 README.md
-run/best_model.pkl
+run/part3/best_model.pkl
 ```
 
 ---

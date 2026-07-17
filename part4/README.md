@@ -50,7 +50,7 @@ python server.py
 Open your browser:
 
 ```
-http://localhost:8080/part4
+http://localhost:8080
 ```
 
 ---
@@ -59,7 +59,7 @@ http://localhost:8080/part4
 
 - `server.py` - Cherrypy web application
 - `processing.py` - Prediction and LLM pipeline
-- `spam_model.joblib` - Trained spam detection model
+- `best_model.pkl' - Trained spam detection model
 - `meta.ini` - LLM configuration
 - `templates/` - HTML templates
 
@@ -78,6 +78,6 @@ http://localhost:8080/part4
 
 ## Notes
 
-- Ensure `spam_model.joblib` is available before starting the application.
+- Ensure `best_model.pkl` is available before starting the application.
 - Update the API key in `meta.ini` before running Part 4.
 - Internet access is required for real LLM responses.
