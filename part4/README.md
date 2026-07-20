@@ -5,7 +5,7 @@
 Part 4 extends the Spam Detection project by generating an AI explanation for each model prediction using an LLM.
 
 The application:
-- Loads the trained spam detection model (`spam_model.joblib`)
+- Loads the trained spam detection model (`best_model.pkl`)
 - Predicts whether an email is Spam or Ham
 - Uses an LLM to explain the prediction
 - Validates the LLM response
